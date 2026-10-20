@@ -4237,8 +4237,10 @@ eg. with --dbservices=pg1,pg2
 The first one is taken as the reference (usually a primary).
 
 By default it ignores a few parameters that will differ on a secondary:
-archive_mode,primary_conninfo,primary_slot_name.
+archive_mode, in_hot_standby, primary_conninfo, primary_slot_name and
+transaction_read_only.
 Force the check of all parameters with C<--identical>.
+The parameter effective_wal_level is always ignored.
 
 C<--ignore-paths> ignore all differences in paths (data_directory, config_file, PID file, etc.)
 
@@ -4248,7 +4250,13 @@ Eg : --exclude '(.*parallel.*|cluster_name|auto_explain.*|pg_stat_statements.*|w
 
 No perfdata
 
-Returns a Warning if some parameters are different
+Returns a Warning if some parameters are different. A parameter missing on
+one side is reported with the value C<ABSENT>: C<name=ABSENT> followed by the
+value on the reference when it only exists on the reference, or
+C<name=value (ABSENT from ref)> when it is missing from the reference.
+
+Hosts are named by their service, or by their connection parameters if
+given with C<--host> and C<--port>.
 
 Required privileges: unprivileged role
 
@@ -4311,22 +4319,29 @@ sub check_configuration_difference {
     %ignored = map { $_ => 1 } ( @ignored_all) ;
     # foreach my $key (keys %ignored) { print "IGNORED: $key \n"; };
 
+    # Name of the hosts in messages: the service if any, else the connection
+    # parameters
+    $_->{'label'} = $_->{'dbservice'} // $_->{'name'} foreach @hosts;
+
     # Fetch configuration for each host ; compare each parameter to the one on the 1st host a reference
     foreach my $host (@hosts) {
-        is_compat $hosts[$num_clusters], 'configuration', $PG_VERSION_80 or exit 1;
+        is_compat $hosts[$num_clusters], 'configuration_difference', $PG_VERSION_80 or exit 1;
         $num_clusters ++;
-        dprint ("Cluster $num_clusters : $host->{'dbservice'} \n" );
+        dprint ("Cluster $num_clusters : $host->{'label'} \n" );
         # Fetch PG configuration from each host
         $host->{'rs'} = \@{ query_ver( $host, %queries ) };
         if ( $num_clusters == 1 ) {
             # a hash table is more useful as the number of lines may in pg_settings may be different
             %refserver = map { $_->[0] => $_->[1] } @{ $host->{'rs'} };
         } else {
-            # Compare each setting with the setting from the first host
+            # Compare each setting with the setting from the first host, in
+            # both ways: parameters absent from the reference or from this host
+            my %server = map { $_->[0] => $_->[1] } @{ $host->{'rs'} };
+            my %names  = map { $_ => 1 } ( keys %server, keys %refserver );
             $nbdiff = 0;
-            REC_PARAM: foreach my $cfg ( @{$host->{'rs'}} ) {
-                my ($name, $setting) = @$cfg;
-                dprint ("$host->{'dbservice'} : $name, $setting \n" ) ;
+            REC_PARAM: foreach my $name ( sort keys %names ) {
+                my $setting = ($server{$name}//'ABSENT') ;
+                dprint ("$host->{'label'} : $name, $setting \n" ) ;
                 $setting_ref = ($refserver{$name}//'ABSENT') ;
                 # Parameter is different, not ignored, not 'N/A' on both sides,
                 # not excluded by --exclude
@@ -4338,9 +4353,9 @@ sub check_configuration_difference {
                     }
                     dprint ("DIFF : $name : $setting vs: $setting_ref", "\n") ;
                     $nbdiff ++ ; $mess = "" ;
-                    $mess = "[$host->{'dbservice'}] : " if $nbdiff == 1 ;
+                    $mess = "[$host->{'label'}] : " if $nbdiff == 1 ;
                     if ( not defined $refserver{$name} ) {
-                        $mess = $mess."$name=$setting (ABSENT from $hosts[0]->{'dbservice'})";
+                        $mess = $mess."$name=$setting (ABSENT from $hosts[0]->{'label'})";
                     } else {
                         $mess = $mess."$name=$setting (≠ $setting_ref)";
                     }
@@ -4355,7 +4370,7 @@ sub check_configuration_difference {
 
     return status_warning( $me, \@msg) if @msg > 0;
 
-    return status_ok( $me, [ "$num_clusters Configurations checked :".join(' ', map { $_->{'dbservice'} } @hosts) ]);
+    return status_ok( $me, [ "$num_clusters Configurations checked :".join(' ', map { $_->{'label'} } @hosts) ]);
 }
 
 =item B<connection> (all)

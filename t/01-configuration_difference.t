@@ -11,7 +11,7 @@ use lib 't/lib';
 use pgNode;
 use Test::More;
 
-plan tests => 12;
+plan tests => 20;
 
 # declare instances
 note "3 instances creation";
@@ -34,7 +34,7 @@ my $u = $ENV{'USER'} || 'postgres';
 
 # Tests for PostreSQL 9.0 and after
 SKIP: {
-    skip "these tests requires PostgreSQL 9.1 and after", 12
+    skip "these tests requires PostgreSQL 9.1 and after", 20
         unless $pgversion >= '9.0';
 
     $ENV{PGSERVICEFILE} = $service_file;
@@ -151,6 +151,57 @@ EOSF
         ],
         [ qr/^FATAL.*$/m ],
         "one cluster and it won't work"
+    );
+
+    SKIP: {
+        skip "checking cluster_name is not supported before v9.5", 4
+            unless $pgversion >= '9.5';
+
+        # Hosts given without service are named by their connection
+        # parameters
+        note "Check with --host and --port";
+        $prim->command_checks_all( [
+            './check_pgactivity', '--service'  => 'configuration_difference',
+                                  '--format'   => 'human',
+                                  '--host'     => "$primh,$sec1h",
+                                  '--port'     => "$primp,$sec1p",
+                                  '--username' => $u,
+                                  '--dbname'   => 'postgres',
+                                  '--exclude'  => 'port',
+                                  '--ignore-paths'
+            ],
+            1,
+            [
+                qr/Returns  *: 1 \(WARNING\)$/m,
+                qr/Message  *: \[host:\Q$sec1h\E port:$sec1p db:postgres\] : cluster_name=sec1 \(≠ prim\)$/m
+            ],
+            [ qr/^$/ ],
+            'two clusters given with --host and --port'
+        );
+    }
+
+    # A parameter only existing on the reference is reported
+    note "Check with a parameter only existing on the reference";
+    $prim->safe_psql('postgres',
+        "ALTER SYSTEM SET session_preload_libraries TO 'auto_explain'");
+    $prim->safe_psql('postgres', 'SELECT pg_reload_conf()');
+
+    $prim->command_checks_all( [
+        './check_pgactivity', '--service'  => 'configuration_difference',
+                              '--format'   => 'human',
+                              '--dbservice' => 'prim,sec1',
+                              '--exclude'  => 'port',
+                              '--exclude'  => 'cluster_name',
+                              '--exclude'  => '^session_preload_libraries$',
+                              '--ignore-paths'
+        ],
+        1,
+        [
+            qr/Returns  *: 1 \(WARNING\)$/m,
+            qr/auto_explain\.log_analyze=ABSENT \(≠ off\)$/m
+        ],
+        [ qr/^$/ ],
+        'parameter only existing on the reference'
     );
 
 
