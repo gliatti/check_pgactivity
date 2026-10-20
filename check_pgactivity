@@ -4101,7 +4101,10 @@ Warning and Critical thresholds are ignored.
 
 The thresholds for some parameters may be modified with:
 C<--work_mem>, C<--maintenance_work_mem>, C<--shared_buffers>,C<--wal_buffers>,
-C<--checkpoint_segments>, C<--max_wal_size>, C<--effective_cache_size>
+C<--checkpoint_segments>, C<--max_wal_size>, C<--effective_cache_size>.
+They expect a positive integer in the unit of the parameter in pg_settings,
+except C<--max_wal_size> which is always in MB, even before 10. 0 keeps the
+default value.
 
 Use one or more C<--exclude REGEX> parameters
 to exclude some checks matching a regular expression.
@@ -4139,6 +4142,34 @@ sub check_configuration {
     my $no_check_fsync        = $args{'no_check_fsync'} || 0;
     my $no_check_enable       = $args{'no_check_enable'} || 0;
     my $no_check_track_counts = $args{'no_check_track_counts'} || 0;
+    # max_wal_size, in MB
+    my $max_wal_size_mb = 'setting::bigint';
+
+    foreach my $param ( qw( work_mem maintenance_work_mem shared_buffers
+        wal_buffers checkpoint_segments max_wal_size effective_cache_size )
+    ) {
+        pod2usage(
+            -message => "FATAL: argument of --$param must be a positive integer.",
+            -exitval => 127
+        ) if defined $args{$param} and $args{$param} < 0;
+    }
+
+    @hosts = @{ parse_hosts %args };
+
+    pod2usage(
+        -message => 'FATAL: you must give only one host with service "configuration".',
+        -exitval => 127
+    ) if @hosts != 1;
+
+    is_compat $hosts[0], 'configuration', $PG_VERSION_80 or exit 1;
+
+    # Before 10, max_wal_size is a number of WAL segments, and
+    # wal_segment_size a number of WAL blocks
+    $max_wal_size_mb = q{setting::bigint * (
+            SELECT s.setting::bigint * b.setting::bigint / 1048576
+            FROM pg_settings s, pg_settings b
+            WHERE s.name = 'wal_segment_size' AND b.name = 'wal_block_size'
+        )} if $hosts[0]{'version_num'} < $PG_VERSION_100;
 
     my $sql = "
         -- critical
@@ -4179,10 +4210,11 @@ sub check_configuration {
             OR ( name='jit_expressions' and setting='off' )
             OR ( name='jit_profiling_support' and setting='on' )
             OR ( name='jit_tuple_deforming' and setting='off' )
-            OR ( name='lc_messages' and (setting <> 'C' and setting not like 'en%') )
+            OR ( name='lc_messages' and setting not in ('C', 'POSIX')
+                and setting not like 'C.%' and setting not like 'en%' )
             OR ( name='maintenance_work_mem' and setting::bigint<$maintenance_work_mem )
-            OR ( name='max_wal_size' and setting::bigint<$max_wal_size )
-            OR ( name='password_encryption' and setting='md5' )
+            OR ( name='max_wal_size' and $max_wal_size_mb<$max_wal_size )
+            OR ( name='password_encryption' and setting in ('md5', 'on') )
             OR ( name='post_auth_delay' and setting::bigint>0 )
             OR ( name='pre_auth_delay' and setting::bigint>0 )
             OR ( name='server_encoding' and setting<>'UTF8' )
@@ -4198,15 +4230,6 @@ sub check_configuration {
             OR ( name='work_mem' and setting::bigint < $work_mem )
         ";
 
-    @hosts = @{ parse_hosts %args };
-
-    pod2usage(
-        -message => 'FATAL: you must give only one host with service "configuration".',
-        -exitval => 127
-    ) if @hosts != 1;
-
-    is_compat $hosts[0], 'configuration', $PG_VERSION_80 or exit 1;
-
     my @rc = @{ query( $hosts[0], $sql ) };
 
 LOOP: foreach my $setting (@rc) {
@@ -4217,7 +4240,7 @@ LOOP: foreach my $setting (@rc) {
         push @msg_warn => ( $setting->[0] . "=" . $setting->[1] ) if $setting->[2] == 1 ;
     }
 
-    return status_critical( $me, \@msg_crit )
+    return status_critical( $me, [ @msg_crit, @msg_warn ] )
         if ( @msg_crit > 0 );
     return status_warning ( $me, \@msg_warn )
         if ( @msg_warn > 0 );
