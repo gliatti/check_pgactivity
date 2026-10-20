@@ -4851,7 +4851,14 @@ Perfdata returns the cache hit ratio per database. Template databases and
 databases that do not allow connections will not be checked, nor will the
 databases which have never been accessed.
 
-Critical and Warning thresholds are optional. They only accept a percentage.
+A database whose statistics were reset since last call is ignored until next
+call. Starting with 9.1, a reset is detected using C<stats_reset>; before,
+only when a counter went backward.
+
+Critical and Warning thresholds are optional. They only accept a percentage
+between 0 and 100. An alert is raised when the hit ratio goes below the
+threshold, so the warning threshold must be greater than or equal to the
+critical one.
 
 This service supports both C<--dbexclude> and C<--dbinclude> parameters.
 
@@ -4872,22 +4879,36 @@ sub check_hit_ratio {
     my @dbexclude  = @{ $args{'dbexclude'} };
     my $me         = 'POSTGRES_HIT_RATIO';
     my $db_checked = 0;
-    my $sql        = q{SELECT d.datname, blks_hit, blks_read
-        FROM pg_stat_database sd
-          JOIN pg_database d ON d.oid = sd.datid
-        WHERE d.datallowconn AND NOT d.datistemplate
-        ORDER BY datname};
+    my %queries    = (
+        $PG_VERSION_MIN => q{SELECT d.datname, blks_hit, blks_read, NULL
+            FROM pg_stat_database sd
+              JOIN pg_database d ON d.oid = sd.datid
+            WHERE d.datallowconn AND NOT d.datistemplate
+            ORDER BY datname},
+        $PG_VERSION_91 => q{SELECT d.datname, blks_hit, blks_read,
+                coalesce(extract(EPOCH from sd.stats_reset), 0)
+            FROM pg_stat_database sd
+              JOIN pg_database d ON d.oid = sd.datid
+            WHERE d.datallowconn AND NOT d.datistemplate
+            ORDER BY datname}
+    );
 
-    # Warning and critical must be %.
+    # Warning and critical must be % between 0 and 100.
     if ( defined $args{'warning'} and defined $args{'critical'} ) {
         pod2usage(
-            -message => "FATAL: critical and warning thresholds only accept percentages.",
+            -message => "FATAL: critical and warning thresholds only accept percentages between 0 and 100.",
             -exitval => 127
-        ) unless $args{'warning'} =~ m/^([0-9.]+)%$/
-            and $args{'critical'} =~ m/^([0-9.]+)%$/;
+        ) unless $args{'warning'} =~ m/^([0-9]+(?:\.[0-9]+)?)%$/ and $1 <= 100
+            and $args{'critical'} =~ m/^([0-9]+(?:\.[0-9]+)?)%$/ and $1 <= 100;
 
         $args{'warning'}  = substr $args{'warning'}, 0, -1;
         $args{'critical'} = substr $args{'critical'}, 0, -1;
+
+        # an alert is raised when the ratio goes below the threshold
+        pod2usage(
+            -message => "FATAL: warning threshold must be greater than or equal to the critical one.",
+            -exitval => 127
+        ) if $args{'warning'} < $args{'critical'};
     }
 
 
@@ -4901,7 +4922,7 @@ sub check_hit_ratio {
 
     %db_hitratio = %{ load( $hosts[0], 'db_hitratio', $args{'status-file'} ) || {} };
 
-    @rs = @{ query( $hosts[0], $sql ) };
+    @rs = @{ query_ver( $hosts[0], %queries ) };
 
     DB_LOOP: foreach my $db (@rs) {
         my $ratio;
@@ -4909,7 +4930,7 @@ sub check_hit_ratio {
         my $read_delta;
         my @perfdata_value;
 
-        $new_db_hitratio{ $db->[0] } = [ $db->[1], $db->[2], 'NaN' ];
+        $new_db_hitratio{ $db->[0] } = [ $db->[1], $db->[2], 'NaN', $db->[3] ];
 
         next DB_LOOP if grep { $db->[0] =~ /$_/ } @dbexclude;
         next DB_LOOP if @dbinclude and not grep { $db->[0] =~ /$_/ } @dbinclude;
@@ -4917,6 +4938,19 @@ sub check_hit_ratio {
         $db_checked++;
 
         next DB_LOOP unless defined $db_hitratio{ $db->[0] };
+
+        # Statistics reset since last call. Before 9.1, there is no
+        # stats_reset: rely on the counters going backward. A status file
+        # written by a previous version has no stats_reset.
+        if ( $db->[1] < $db_hitratio{ $db->[0] }[0]
+            or $db->[2] < $db_hitratio{ $db->[0] }[1]
+            or ( defined $db->[3] and $db->[3] ne ''
+                and defined $db_hitratio{ $db->[0] }[3]
+                and $db->[3] ne $db_hitratio{ $db->[0] }[3] )
+        ) {
+            dprint("db $db->[0]: statistics reset since last call\n");
+            next DB_LOOP;
+        }
 
         $hit_delta  = $new_db_hitratio{ $db->[0] }[0] - $db_hitratio{ $db->[0] }[0];
         $read_delta = $new_db_hitratio{ $db->[0] }[1] - $db_hitratio{ $db->[0] }[1];
