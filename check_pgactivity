@@ -3946,7 +3946,10 @@ separated 'label=value'. Available labels are B<rollbacks>, B<rollback_rate>
 and B<rollback_ratio>, which will be compared to the number of rollbacks, the
 rollback rate and the rollback ratio of each database. Warning or critical will
 be raised if the reported value is greater than B<rollbacks>, B<rollback_rate>
-or B<rollback_ratio>.
+or B<rollback_ratio>. Labels are case insensitive.
+
+A database created or whose statistics were reset since last call is ignored
+until next call.
 
 Required privileges: unprivileged role.
 
@@ -3960,19 +3963,29 @@ sub check_commit_ratio {
     my @hosts;
     my %xacts;
     my %new_xacts;
-    my $global_commits;
-    my $global_rollbacks;
+    my $global_commits   = 0;
+    my $global_rollbacks = 0;
     my %warn;
     my %crit;
     my %args  = %{ $_[0] };
     my $me    = 'POSTGRES_COMMIT_RATIO';
-    my $sql   = q{
-        SELECT floor(extract(EPOCH from now())), s.datname,
-            s.xact_commit, s.xact_rollback
-        FROM pg_stat_database s
-          JOIN pg_database d ON s.datid = d.oid
-        WHERE d.datallowconn
-    };
+    my %queries = (
+        $PG_VERSION_MIN => q{
+            SELECT floor(extract(EPOCH from now())), s.datname,
+                s.xact_commit, s.xact_rollback, NULL
+            FROM pg_stat_database s
+              JOIN pg_database d ON s.datid = d.oid
+            WHERE d.datallowconn
+        },
+        $PG_VERSION_91 => q{
+            SELECT floor(extract(EPOCH from now())), s.datname,
+                s.xact_commit, s.xact_rollback,
+                coalesce(extract(EPOCH from s.stats_reset), 0)
+            FROM pg_stat_database s
+              JOIN pg_database d ON s.datid = d.oid
+            WHERE d.datallowconn
+        }
+    );
 
     if ( defined $args{'warning'} ) {
         my $thresholds_re = qr/(rollbacks|rollback_rate|rollback_ratio)\s*=\s*(\d+)/i;
@@ -3985,13 +3998,14 @@ sub check_commit_ratio {
         ) unless $args{'warning'} =~ m/^$thresholds_re(\s*,\s*$thresholds_re)*$/
             and $args{'critical'} =~ m/^$thresholds_re(\s*,\s*$thresholds_re)*$/ ;
 
+        # labels are case insensitive
         while ( $args{'warning'} =~ /$thresholds_re/g ) {
-            my ($threshold, $value) = ($1, $2);
+            my ($threshold, $value) = (lc $1, $2);
             $warn{$threshold} = $value if $1 and defined $2;
         }
 
         while ( $args{'critical'} =~ /$thresholds_re/g ) {
-            my ($threshold, $value) = ($1, $2);
+            my ($threshold, $value) = (lc $1, $2);
             $crit{$threshold} = $value if $1 and defined $2;
         }
     }
@@ -4005,12 +4019,13 @@ sub check_commit_ratio {
 
     %xacts = %{ load( $hosts[0], 'commit_ratio', $args{'status-file'} ) || {} };
 
-    @rs = @{ query( $hosts[0], $sql ) };
+    @rs = @{ query_ver( $hosts[0], %queries ) };
 
     $new_xacts{$_->[1]} = {
-        'ts'       => $_->[0],
-        'commit'   => $_->[2],
-        'rollback' => $_->[3]
+        'ts'          => $_->[0],
+        'commit'      => $_->[2],
+        'rollback'    => $_->[3],
+        'stats_reset' => $_->[4]
     } foreach @rs;
 
     save $hosts[0], 'commit_ratio', \%new_xacts, $args{'status-file'};
@@ -4020,8 +4035,20 @@ sub check_commit_ratio {
     foreach my $db ( keys %new_xacts ) {
 
         my $ratio = 0;
+
+        # database created since last call
+        next unless exists $xacts{$db};
+
         my $commits   = $new_xacts{$db}{'commit'} - $xacts{$db}{'commit'};
         my $rollbacks = $new_xacts{$db}{'rollback'} - $xacts{$db}{'rollback'};
+
+        # statistics reset since last call. Before 9.1, there is no
+        # stats_reset: rely on the counters going backward.
+        next if $commits < 0 or $rollbacks < 0;
+        next if defined $new_xacts{$db}{'stats_reset'}
+            and $new_xacts{$db}{'stats_reset'} ne ''
+            and defined $xacts{$db}{'stats_reset'}
+            and $new_xacts{$db}{'stats_reset'} ne $xacts{$db}{'stats_reset'};
 
         # default to 1 sec if called twice in the same second
         my $sec = ( $new_xacts{$db}{'ts'} - $xacts{$db}{'ts'} ) || 1;
