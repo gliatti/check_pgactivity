@@ -2007,8 +2007,8 @@ sub check_archiver {
     pod2usage(
         -message => "FATAL: critical and warning thresholds only accept raw numbers.",
         -exitval => 127
-    ) if defined $args{'critical'} and $args{'warning'} !~ m/^([0-9]+)$/
-        and  $args{'critical'} !~ m/^([0-9]+)$/;
+    ) if ( defined $args{'warning'} and $args{'warning'} !~ m/^([0-9]+)$/ )
+        or ( defined $args{'critical'} and $args{'critical'} !~ m/^([0-9]+)$/ );
 
     @hosts = @{ parse_hosts %args };
 
@@ -2089,8 +2089,8 @@ sub check_archiver {
                 * executed only if superuser and archiving is on */
                 (SELECT extract('epoch' from (current_timestamp -
                         (pg_stat_file('pg_wal/'||pg_walfile_name(
-                           (to_hex((last_archived_off+1)/4294967296)
-                           ||'/'||to_hex((last_archived_off+1)%4294967296))::pg_lsn
+                           (to_hex((COALESCE(last_archived_off, last_failed_off)+1)/4294967296)
+                           ||'/'||to_hex((COALESCE(last_archived_off, last_failed_off)+1)%4294967296))::pg_lsn
                       ), true)).modification ))
                  WHERE (current_setting('is_superuser')::bool AND current_setting('archive_mode') = 'on')
                 ) AS oldest
@@ -2107,8 +2107,8 @@ sub check_archiver {
                 ('x'||substr(last_failed_wal_hex, 9, 8))::bit(32)::bigint*4294967296
                     -- offset to the begining of the segment
                     + ('x'||substr(last_failed_wal, 17, 8))::bit(32)::bigint * walsegsize
-                    -- offset to the end of the segment
-                    + walsegsize AS last_failed_off,
+                    -- the failed segment is not archived: keep the offset to its begining
+                    AS last_failed_off,
                 CASE WHEN pg_is_in_recovery()
                 THEN pg_last_wal_receive_lsn()
                 ELSE pg_current_wal_lsn()
@@ -2122,7 +2122,7 @@ sub check_archiver {
                     THEN last_archived_wal
                     ELSE NULL -- return NULL if last successfully archived file is a .history or .backup file
                 END AS last_archived_wal_hex,
-                CASE WHEN (last_failed_wal NOT LIKE '%.history' AND last_archived_wal NOT LIKE '%.backup')
+                CASE WHEN (last_failed_wal NOT LIKE '%.history' AND last_failed_wal NOT LIKE '%.backup')
                     THEN last_failed_wal
                     ELSE NULL -- return NULL if last failed archive is a .history or .backup file
                 END AS last_failed_wal_hex,
@@ -2157,8 +2157,8 @@ sub check_archiver {
 		CASE WHEN current_setting('archive_mode')='on'
                 THEN extract('epoch' from (current_timestamp -
                     (pg_stat_file('pg_wal/'||pg_walfile_name(
-                        (to_hex((last_archived_off+1)/4294967296)
-                        ||'/'||to_hex((last_archived_off+1)%4294967296))::pg_lsn
+                        (to_hex((COALESCE(last_archived_off, last_failed_off)+1)/4294967296)
+                        ||'/'||to_hex((COALESCE(last_archived_off, last_failed_off)+1)%4294967296))::pg_lsn
                     ), true)).modification )
 		)
                ELSE NULL
@@ -2176,8 +2176,8 @@ sub check_archiver {
                 ('x'||substr(last_failed_wal_hex, 9, 8))::bit(32)::bigint*4294967296
                     -- offset to the begining of the segment
                     + ('x'||substr(last_failed_wal, 17, 8))::bit(32)::bigint * walsegsize
-                    -- offset to the end of the segment
-                    + walsegsize AS last_failed_off,
+                    -- the failed segment is not archived: keep the offset to its begining
+                    AS last_failed_off,
                 CASE WHEN pg_is_in_recovery()
                 THEN pg_last_wal_receive_lsn()
                 ELSE pg_current_wal_lsn()
@@ -2191,7 +2191,7 @@ sub check_archiver {
                     THEN last_archived_wal
                     ELSE NULL -- return NULL if last successfully archived file is a .history or .backup file
                 END AS last_archived_wal_hex,
-                CASE WHEN (last_failed_wal NOT LIKE '%.history' AND last_archived_wal NOT LIKE '%.backup')
+                CASE WHEN (last_failed_wal NOT LIKE '%.history' AND last_failed_wal NOT LIKE '%.backup')
                     THEN last_failed_wal
                     ELSE NULL -- return NULL if last failed archive is a .history or .backup file
                 END AS last_failed_wal_hex,

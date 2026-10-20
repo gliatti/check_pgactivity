@@ -16,7 +16,7 @@ my $node      = pgNode->get_new_node('prod');
 my $pga_data = "$TestLib::tmp_check/pga.data";
 my $wal;
 my @stdout;
-my $num_tests = 29;
+my $num_tests = 43;
 
 $node->init(has_archiving => 1);
 
@@ -74,6 +74,23 @@ $node->command_checks_all( [
     [ qr/^$/ ],
     'basic check without thresholds with superuser'
 );
+
+# thresholds must both be raw numbers
+foreach my $thresholds ( [ '50%', '10' ], [ '5', '10%' ] ) {
+    $node->command_checks_all( [
+        './check_pgactivity', '--service'     => 'archiver',
+                              '--username'    => $ENV{'USER'} || 'postgres',
+                              '--status-file' => $pga_data,
+                              '--format'      => 'human',
+                              '--warning'     => $thresholds->[0],
+                              '--critical'    => $thresholds->[1]
+        ],
+        127,
+        [ qr/^$/ ],
+        [ qr/^FATAL: critical and warning thresholds only accept raw numbers\.$/m ],
+        "reject non raw threshold: -w $thresholds->[0] -c $thresholds->[1]"
+    );
+}
 
 # archiver failing
 
@@ -193,6 +210,53 @@ SKIP: {
         'do not bail out when archiver is off'
     );
 
+}
+
+# Archiving failing since the very beginning: pg_stat_archiver has no
+# last_archived_wal, the number of WAL files ready to archive must be computed
+# from last_failed_wal.
+SKIP: {
+    skip "pg_stat_archiver based check is only used from v10", 8
+        if $node->version < 10;
+
+    my $node2 = pgNode->get_new_node('never_archived');
+
+    $node2->init(has_archiving => 1);
+    $node2->append_conf('postgresql.conf', "wal_level = replica");
+    $node2->append_conf('postgresql.conf', "archive_command = 'false'");
+    $node2->start;
+
+    $node2->psql('template1', 'create table t (i int primary key)');
+    $node2->psql('template1', 'insert into t select generate_series(1,10000) as i');
+    $node2->switch_wal;
+    $node2->psql('template1', 'insert into t select generate_series(10001,20000) as i');
+    $node2->switch_wal;
+    # avoid same race condition
+    $node2->psql('template1', 'checkpoint');
+
+    # FIXME: arbitrary sleep time to wait for archiver to fail at least one time
+    sleep 1;
+
+    $node2->command_checks_all( [
+        './check_pgactivity', '--service'     => 'archiver',
+                              '--username'    => $ENV{'USER'} || 'postgres',
+                              '--status-file' => "$TestLib::tmp_check/pga2.data",
+                              '--format'      => 'human'
+        ],
+        2,
+        [
+            qr/^Service      *: POSTGRES_ARCHIVER$/m,
+            qr/^Returns      *: 2 \(CRITICAL\)$/m,
+            qr/^Message      *: 2 WAL files ready to archive$/m,
+            qr/^Message      *: archiver failing on 000000010000000000000001$/m,
+            qr/^Perfdata     *: ready_archive=2 min=0$/m,
+            qr/^Perfdata     *: oldest_ready_wal=\d+s min=0$/m
+        ],
+        [ qr/^$/ ],
+        'failing archiver without any WAL ever archived'
+    );
+
+    $node2->stop( 'immediate' );
 }
 
 ### End of tests ###
