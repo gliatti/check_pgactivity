@@ -2846,14 +2846,19 @@ This service requires that data checksums are enabled on the target instance.
 UNKNOWN will be returned if that's not the case.
 
 Critical and Warning thresholds are optional. They only accept a raw number of
-checksums errors per database.  If the thresholds are not provided, a default
-value of `1` will be used for both thresholds.
+checksums errors per database, the warning threshold being lower or equal to
+the critical one.  If the thresholds are not provided, a default value of `1`
+will be used for both thresholds.
 
 Checksums errors are CRITICAL issues, so it's highly recommended to keep
 default threshold, as immediate action should be taken as soon as such a
 problem arises.
 
-Perfdata contains the number of error per database.
+Perfdata contains the number of error per database, template databases
+included, and a C<< <shared objects> >> line for errors on shared catalogs.
+Note that this line is only filled starting with PostgreSQL 18: before,
+errors on shared catalogs are counted in the database of the session that
+detected them.
 
 Required privileges: unprivileged user.
 
@@ -2888,6 +2893,16 @@ sub check_checksum_errors {
         $w_limit = $args{'warning'};
         $c_limit = $args{'critical'};
     }
+
+    pod2usage(
+        -message => "FATAL: critical and warning thresholds only accept raw numbers.",
+        -exitval => 127
+    ) unless $w_limit =~ m/^[0-9]+$/ and $c_limit =~ m/^[0-9]+$/;
+
+    pod2usage(
+        -message => "FATAL: warning threshold must be lower or equal to critical threshold.",
+        -exitval => 127
+    ) if $w_limit > $c_limit;
 
     @hosts = @{ parse_hosts %args };
 

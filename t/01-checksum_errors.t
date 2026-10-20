@@ -11,7 +11,7 @@ use lib 't/lib';
 use pgNode;
 use pgSession;
 use Time::HiRes qw(usleep gettimeofday tv_interval);
-use Test::More tests => 2;
+use Test::More tests => 3;
 
 my $node = pgNode->get_new_node('prod');
 
@@ -19,6 +19,31 @@ $node->init( data_checksums => 1 );
 $node->start;
 
 ### Beginning of tests ###
+
+# thresholds must be raw numbers, warning lower or equal to critical
+subtest thresholds => sub {
+    plan tests => 6;
+
+    foreach my $t (
+        [ [ "abc", "10" ], qr/^FATAL: critical and warning thresholds only accept raw numbers\.$/m ],
+        [ [ "5", "1" ],    qr/^FATAL: warning threshold must be lower or equal to critical threshold\.$/m ],
+    ) {
+        $node->command_checks_all(
+            [
+                "./check_pgactivity",
+                "--service"  => "checksum_errors",
+                "--username" => $ENV{"USER"} || "postgres",
+                "--format"   => "human",
+                "--warning"  => $t->[0][0],
+                "--critical" => $t->[0][1],
+            ],
+            127,
+            [qr/^$/],
+            [ $t->[1] ],
+            "reject thresholds -w $t->[0][0] -c $t->[0][1]"
+        );
+    }
+};
 
 $node->psql( 'postgres', 'CREATE TABLE corruptme (x text)' );
 $node->psql( 'postgres', '
