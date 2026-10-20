@@ -782,6 +782,10 @@ sub to_size($) {
 
     return $val if $val =~ /^(-?inf)|(NaN$)/i;
 
+    # range given as threshold, eg. "-1024:1024"
+    return join ':', map { &to_size($_) } split /:/, $val
+        if $val =~ /:/;
+
     for ( $i=0; $i < 6 and abs($val) > 1024; $i++ ) {
         $val = $val / 1024;
     }
@@ -914,7 +918,7 @@ LOOP_TS: while ( my $val = shift @date ) {
 =item B<Size>
 
 If THRESHOLD is a size, the following units are accepted (not case sensitive):
-b (Byte), kb (KB), mb (MB), gb (GB), tb (TB), pb (PB), eb (EB) or Zb (ZB). Only
+b or o (Byte), kb (KB), mb (MB), gb (GB), tb (TB), pb (PB), eb (EB) or Zb (ZB). Only
 integers are accepted. Eg. C<1.5MB> will be refused, use C<1500kB>.
 
 The factor between units is 1024 bytes. Eg. C<1g = 1G = 1024*1024*1024.>
@@ -933,7 +937,8 @@ sub get_size($;$) {
     die "Only integers are accepted as size. Adjust the unit to your need."
         if $str_size =~ /[.,]/;
 
-    $str_size =~ /^([0-9]+)(.*)$/;
+    # surrounding spaces are accepted by is_size
+    $str_size =~ /^\s*([0-9]+)(.*?)\s*$/;
 
     $size = int($1);
     $unit = lc($2);
@@ -949,7 +954,7 @@ sub get_size($;$) {
         return int( $size * $ratio / 100 );
     }
 
-    return $size           if $unit eq 'b';
+    return $size           if $unit =~ '^[bo]$';
     return $size * 1024    if $unit =~ '^k[bo]?$';
     return $size * 1024**2 if $unit =~ '^m[bo]?$';
     return $size * 1024**3 if $unit =~ '^g[bo]?$';
@@ -4563,7 +4568,14 @@ The C<delta> label accepts either a raw number, a percentage, or a size.
 The aim of the delta parameter is to detect unexpected database size variations.
 Delta thresholds are absolute value, and delta percentages are computed against
 the previous database size.
-A same label must be filled for both warning and critical.
+Only integers are accepted, eg. use C<delta=1500MB> instead of C<delta=1.5GB>.
+A delta alert is only raised if the size changed: a null delta threshold (or a
+percentage rounded to 0 byte on a small database) means any variation.
+A same label must be filled for both warning and critical. Labels are case
+insensitive.
+
+The C<size> threshold is checked on every call. The C<delta> threshold is only
+checked from the second call, for databases found in the status file.
 
 For backward compatibility, if a single raw number or percentage or size is given with no
 label, it applies on the size difference for each database since the last execution.
@@ -4629,13 +4641,14 @@ sub check_database_size {
         ) unless $args{'warning'} =~ m/^$thresholds_re(\s*,\s*$thresholds_re)*$/
             and $args{'critical'} =~ m/^$thresholds_re(\s*,\s*$thresholds_re)*$/ ;
 
+        # labels are case insensitive
         while ( $args{'warning'} =~ /$thresholds_re/g ) {
-            my ($threshold, $value) = ($1, $2);
+            my ($threshold, $value) = (lc $1, $2);
             $warn{$threshold} = $value if $1 and defined $2;
         }
 
         while ( $args{'critical'} =~ /$thresholds_re/g ) {
-            my ($threshold, $value) = ($1, $2);
+            my ($threshold, $value) = (lc $1, $2);
             $crit{$threshold} = $value if $1 and defined $2;
         }
 
@@ -4654,11 +4667,11 @@ sub check_database_size {
           or (defined $crit{'size'} and not defined $warn{'size'});
 
         pod2usage(
-            -message => "FATAL: Delta threshold only accept a raw number, a size or a percentage.\n"
+            -message => "FATAL: Delta threshold only accept an integer raw number, size or percentage.\n"
                 . "See documentation for more information.",
             -exitval => 127
-        ) if (defined $warn{'delta'} and not ( is_size($warn{'delta'}) or $warn{'delta'} =~ m/^([0-9.]+)%?$/ ))
-          or (defined $crit{'delta'} and not ( is_size($crit{'delta'}) or $crit{'delta'} =~ m/^([0-9.]+)%?$/ ));
+        ) if (defined $warn{'delta'} and not ( is_size($warn{'delta'}) or $warn{'delta'} =~ m/^[0-9]+%$/ ))
+          or (defined $crit{'delta'} and not ( is_size($crit{'delta'}) or $crit{'delta'} =~ m/^[0-9]+%$/ ));
 
         pod2usage(
             -message => "FATAL: you must specify both critical and warning thresholds for delta.",
@@ -4684,20 +4697,13 @@ sub check_database_size {
 
         $db_checked++;
 
-        unless ( defined $old_db_sizes{ $db->[0] } ) {
-            push @perfdata => [ $db->[0], $db->[1], 'B' ];
-            next DB_LOOP;
-        }
-
-        $delta = $db->[1] - $old_db_sizes{ $db->[0] };
-
         # Must check threshold for each database
         if ( defined $args{'warning'} ) {
             my $limit;
             my $w_limit;
             my $c_limit;
 
-            # Check against max db size
+            # Check against max db size. It does not need the previous size.
             if ( defined $crit{'size'} ) {
                 $c_limit = get_size( $crit{'size'},  $db->[1] );
                 push @msg_crit => sprintf( "%s (size: %s)", $db->[0], to_size($db->[1]) )
@@ -4713,7 +4719,13 @@ sub check_database_size {
 
             push @perfdata => [ $db->[0], $db->[1], 'B', $w_limit, $c_limit ];
 
-            # Check against delta variations (% or absolute values)
+            # first call or new database: no delta
+            next DB_LOOP unless defined $old_db_sizes{ $db->[0] };
+
+            $delta = $db->[1] - $old_db_sizes{ $db->[0] };
+
+            # Check against delta variations (% or absolute values).
+            # No variation never raises an alert, even with a null threshold.
             $c_limit = undef;
             $w_limit = undef;
             if ( defined $crit{'delta'} ) {
@@ -4721,7 +4733,7 @@ sub check_database_size {
                 $limit = get_size( $crit{'delta'},  $old_db_sizes{ $db->[0] });
                 dprint ("DB $db->[0] new size: $db->[1]  old size $old_db_sizes{ $db->[0] } (delta $delta) critical delta $crit{'delta'} computed limit $limit \n");
                 push @msg_crit => sprintf( "%s (delta: %s)", $db->[0], to_size($delta) )
-                    if abs($delta) >= $limit;
+                    if $delta and abs($delta) >= $limit;
                 $c_limit = "-$limit:$limit";
             }
             if ( defined $warn{'delta'}
@@ -4730,7 +4742,7 @@ sub check_database_size {
                 $limit = get_size( $warn{'delta'},  $old_db_sizes{ $db->[0] } );
                 dprint ("DB $db->[0] new size: $db->[1]  old size $old_db_sizes{ $db->[0] } (delta $delta) warning  delta $warn{'delta'} computed limit $limit \n");
                 push @msg_warn => sprintf( "%s (delta: %s)", $db->[0], to_size($delta) )
-                    if abs($delta) >= $limit;
+                    if $delta and abs($delta) >= $limit;
                 $w_limit = "-$limit:$limit";
             }
 
@@ -4738,6 +4750,11 @@ sub check_database_size {
         }
         else {
             push @perfdata => [ $db->[0], $db->[1], 'B' ];
+
+            # first call or new database: no delta
+            next DB_LOOP unless defined $old_db_sizes{ $db->[0] };
+
+            $delta = $db->[1] - $old_db_sizes{ $db->[0] };
             push @perfdata => [ "$db->[0]_delta", $delta, 'B' ];
         }
     }
