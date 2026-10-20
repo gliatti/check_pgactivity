@@ -4762,15 +4762,26 @@ version available on the instance (according to pg_available_extensions).
 Typically, it is used to detect forgotten extension upgrades after package
 upgrades or a pg_upgrade.
 
+The message gives the number of outdated extensions, and the detailed
+message lists them as 'dbname.extension: installed version (should be:
+default version)'.
+
 Perfdata returns the number of outdated extensions in each database.
+
+A database where the query fails (eg. connection refused) does not prevent
+checking the other ones. The service returns a critical alert if an outdated
+extension is found, otherwise an unknown status if some databases could not
+be checked. These databases are listed in the message.
 
 This service supports both C<--dbexclude> and C<--dbinclude> parameters.
 Schemas are ignored, as an extension cannot be installed more than once
 in a database.
 
 This service supports multiple C<--exclude> argument to exclude one or
-more extensions from the check. To ignore an extension only in a particular database,
-use  'dbname/extension_name' syntax.
+more extensions from the check. A regular expression without a '/' is
+only compared to the extension name. To ignore an extension only in a
+particular database, use 'dbname/extension_name' syntax: a regular
+expression containing a '/' is compared to 'dbname/extension_name'.
 
 Examples:
 
@@ -4787,12 +4798,14 @@ sub check_extensions_versions {
     my @longmsg;
     my @hosts;
     my @all_db;
+    my @failed_db;
     my $nb;
     my $me           = 'POSTGRES_CHECK_EXT_VERSIONS';
     my %args         = %{ $_[0] };
     my @dbinclude    = @{ $args{'dbinclude'} };
     my @dbexclude    = @{ $args{'dbexclude'} };
     my $tot_outdated = 0 ;
+    my $db_checked   = 0;
     my $query = q{SELECT name, default_version, installed_version
                  FROM pg_catalog.pg_available_extensions
                  WHERE installed_version != default_version};
@@ -4814,13 +4827,30 @@ sub check_extensions_versions {
         next ALLDB_LOOP if @dbinclude and not grep { $db =~ /$_/ } @dbinclude;
 
         my $outdated = 0;
+        my $rs;
 
-        # For each record: extension, default, installed
-        @rs = @{ query ( $hosts[0], $query, $db ) };
+        # For each record: extension, default, installed.
+        # A failing database must not prevent checking the other ones.
+        $rs = eval { query( $hosts[0], $query, $db, undef, sub { die "\n" } ) };
 
-        REC_LOOP: foreach my $ext (sort @rs) {
+        unless ( defined $rs ) {
+            dprint("db $db: query failed\n");
+            push @failed_db => $db;
+            next ALLDB_LOOP;
+        }
+
+        @rs = @{ $rs };
+
+        REC_LOOP: foreach my $ext (sort { $a->[0] cmp $b->[0] } @rs) {
+            # A regex with a '/' applies to 'dbname/extension', otherwise
+            # only to the extension name
             foreach my $exclude_re ( @{ $args{'exclude'} } ) {
-                next REC_LOOP if $ext->[0] =~ /$exclude_re/ or "$db/$ext->[0]" =~ /$exclude_re/ ;
+                if ( $exclude_re =~ m{/} ) {
+                    next REC_LOOP if "$db/$ext->[0]" =~ /$exclude_re/;
+                }
+                else {
+                    next REC_LOOP if $ext->[0] =~ /$exclude_re/;
+                }
             }
 
             $outdated++;
@@ -4832,12 +4862,21 @@ sub check_extensions_versions {
         $tot_outdated += $outdated;
 
         push @perfdata => [ $db, $outdated, undef, undef, 1, 0 ];
+        $db_checked++;
     }
+
+    push @msg => "$tot_outdated outdated extension(s)" if $tot_outdated > 0;
+    push @msg => sprintf( "%d database(s) could not be checked: %s",
+        scalar @failed_db, join( ', ', @failed_db ) ) if @failed_db;
 
     return status_critical( $me, \@msg, \@perfdata, \@longmsg )
         if $tot_outdated > 0;
 
-    return status_ok( $me, \@msg, \@perfdata, \@longmsg );
+    return status_unknown( $me, \@msg, \@perfdata, \@longmsg )
+        if @failed_db;
+
+    return status_ok( $me, [ "$db_checked database(s) checked" ],
+        \@perfdata, \@longmsg );
 }
 
 
