@@ -3035,8 +3035,9 @@ sub check_hba_settings {
 Check the presence of backup label file (PG15 or later),
 or raise an alarm if it's too old (PG14 or former).
 
-Until PostgreSQL 14, a backup_label appears while a concurrent physical
-backup is running.
+Until PostgreSQL 14, a backup_label appears while an exclusive physical
+backup is running (non-exclusive backups, eg. pg_basebackup, are not
+detected).
 Critical or Warning are raised if the age is above the thresholds
 (only intervals, eg. 1h30m25s).
 
@@ -3045,7 +3046,8 @@ the presence of a backup_label is an immediate failure (Critical),
 as this file should never be present on a running system
 and will prevent a restart.
 
-Perfdata returns the age of the backup_label file, -1 if not present.
+Until PostgreSQL 14, perfdata returns the age of the backup_label file, 0 if
+not present. No perfdata is returned on PostgreSQL 15 and above.
 
 Required privileges:
 - <9.3: superuser
@@ -3116,9 +3118,15 @@ sub check_backup_label_age {
     }
     else {
             # PG15+ : backup_label must not exist
-            $rs = @{ query_ver( $hosts[0], %queries )->[0] }[0];
-            return status_critical( $me, [ "age: ".to_interval($rs) ], \@perfdata )
-                if $rs > 0;
+            # check the presence of the file, not its age, as a fresh file
+            # has an age of 0s.
+            my @rs = @{ query( $hosts[0], q{
+                SELECT sf.size IS NOT NULL,
+                    coalesce(CAST((extract(epoch FROM current_timestamp - sf.modification)) AS integer), 0)
+                FROM pg_stat_file('backup_label', true) sf
+            } )->[0] };
+            return status_critical( $me, [ "age: ".to_interval($rs[1]) ], \@perfdata )
+                if $rs[0] eq 't';
             return status_ok( $me, [ "backup_label file absent" ], \@perfdata );
     }
 

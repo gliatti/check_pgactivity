@@ -150,6 +150,25 @@ if ($pgversion < 15) {
         my $empty = $node->data_dir . '/backup_label';
         open BACKUPLABELFILE, '>', $empty and close BACKUPLABELFILE
         or die "File error with $empty: $!";
+
+        # a freshly created backup_label (age rounded to 0s) must raise
+        # a critical as well
+        utime undef, undef, $empty;
+
+        $node->command_checks_all( [
+        './check_pgactivity', '--service'  => 'backup_label_age',
+                            '--username' => $ENV{'USER'} || 'postgres',
+                            '--format'   => 'human',
+        ],
+        2,
+        [ qr/^Service *: POSTGRES_BACKUP_LABEL_AGE$/m,
+        qr/^Returns *: 2 \(CRITICAL\)$/m,
+        qr/^Message *: age: \ds$/m,
+        ],
+        [ qr/^$/ ],
+        'critical with fresh fake backup_label'
+        );
+
         sleep 1;
 
         $node->command_checks_all( [
