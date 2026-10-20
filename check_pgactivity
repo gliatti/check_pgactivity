@@ -2934,19 +2934,28 @@ sub check_checksum_errors {
 
 Check for issues in the HBA configuration, reported in pg_hba_file_rules.
 
+Lines with errors, and lines with trust or password authentication are
+critical issues. Lines with md5 authentication are merely warning issues.
+
 Critical and Warning thresholds are optional. They only accept a raw number of
-errors.  If the thresholds are not provided, a default value of `1` will be
-used for both thresholds.
+lines, greater than 0, and the warning threshold must not be greater than the
+critical one. If the thresholds are not provided, a default value of `1` will
+be used for both thresholds.
 
-Lines with errors are CRITICAL issues, so it's highly recommended to keep
-default threshold, as immediate action should be taken as soon as such a
-problem arises.
+For each kind of critical issue (errors, trust, password), a Critical is
+raised if its number of lines is greater than or equal to the critical
+threshold, otherwise a Warning if it is greater than or equal to the warning
+threshold. A Warning is raised if the number of md5 lines is greater than or
+equal to the warning threshold: md5 lines never raise a Critical.
 
-Lines with trust or password authentication are CRITICAL issues, and lines with
-md5 authentication are merely WARNING issues.
+Lines with errors call for immediate action, so it's highly recommended to keep
+the default thresholds.
 
-Perfdata contains the number of lines per authentication method. Another
-perfdata gives the number of lines with errors.
+The message lists the number of lines of each kind of issue found, even if it
+is under the thresholds.
+
+Perfdata always contains the number of lines with errors and the number of
+lines per authentication method (trust, password, md5), even if it is 0.
 
 Required privileges:
 superuser, or user with access to pg_hba_file_rules
@@ -2965,11 +2974,15 @@ sub check_hba_settings {
     my $me      = 'POSTGRES_HBA_SETTINGS';
     my $nb_crit = 0;
     my $nb_warn = 0;
-    my $sql     = q{WITH list AS (
-    SELECT 'error'::text, count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL
-    UNION
-    SELECT auth_method, count(*) FROM pg_hba_file_rules WHERE auth_method IN ('trust', 'password', 'md5') GROUP BY 1)
-    SELECT * FROM list WHERE count>0};
+    # Always return the four kinds of issue, even without any line
+    my $sql     = q{SELECT k.kind, (
+        SELECT count(*) FROM pg_hba_file_rules r
+        WHERE ( k.kind = 'error' AND r.error IS NOT NULL )
+           OR ( k.kind <> 'error' AND r.auth_method = k.kind )
+    )
+    FROM (VALUES (1, 'error'), (2, 'trust'), (3, 'password'), (4, 'md5'))
+        AS k(ord, kind)
+    ORDER BY k.ord};
     my $w_limit;
     my $c_limit;
 
@@ -2984,8 +2997,19 @@ sub check_hba_settings {
     if (not defined $args{'warning'} or not defined $args{'critical'}) {
         $w_limit = $c_limit = 1;
     } else {
-        $w_limit = $args{'warning'};
-        $c_limit = $args{'critical'};
+        pod2usage(
+            -message => "FATAL: critical and warning thresholds only accept a raw number of lines greater than 0.",
+            -exitval => 127
+        ) unless $args{'warning'}  =~ m/^\s*[0-9]+\s*$/ and $args{'warning'}  > 0
+             and $args{'critical'} =~ m/^\s*[0-9]+\s*$/ and $args{'critical'} > 0;
+
+        pod2usage(
+            -message => "FATAL: warning threshold must not be greater than the critical one.",
+            -exitval => 127
+        ) if $args{'warning'} > $args{'critical'};
+
+        $w_limit = int $args{'warning'};
+        $c_limit = int $args{'critical'};
     }
 
     @hosts = @{ parse_hosts %args };
@@ -3000,24 +3024,25 @@ sub check_hba_settings {
     @rs = @{ query( $hosts[0], $sql ) };
 
     LOOP: foreach my $line (@rs) {
+        my ( $kind, $nb ) = @$line;
 
-        push @perfdata => [ $line->[0], $line->[1], '', $w_limit, $c_limit ];
+        push @perfdata => [ $kind, $nb, '', $w_limit, $c_limit ];
 
-        if ($line->[0] eq 'error') {
-            $nb_crit += $line->[1];
-            push @msg => "$line->[1] error(s)";
+        next LOOP unless $nb > 0;
+
+        if ( $kind eq 'error' ) {
+            push @msg => "$nb error(s)";
         }
-        elsif ($line->[0] eq 'md5') {
-            $nb_warn += $line->[1];
-            push @msg => "$line->[1] md5 method(s)";
+        else {
+            push @msg => "$nb $kind method(s)";
         }
-        elsif ($line->[0] eq 'password') {
-            $nb_crit += $line->[1];
-            push @msg => "$line->[1] password method(s)";
+
+        # md5 lines are only a warning issue
+        if ( $kind ne 'md5' and $nb >= $c_limit ) {
+            $nb_crit++;
         }
-        elsif ($line->[0] eq 'trust') {
-            $nb_crit += $line->[1];
-            push @msg => "$line->[1] trust method(s)";
+        elsif ( $nb >= $w_limit ) {
+            $nb_warn++;
         }
     }
 
@@ -3026,6 +3051,8 @@ sub check_hba_settings {
 
     return status_warning( $me, \@msg, \@perfdata )
         if $nb_warn > 0;
+
+    return status_ok( $me, \@msg, \@perfdata ) if @msg;
 
     return status_ok( $me, [ "No issue on hba files" ], \@perfdata );
 }

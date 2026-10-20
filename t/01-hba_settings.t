@@ -11,7 +11,7 @@ use lib 't/lib';
 use pgNode;
 use Test::More;
 
-my $num_tests = 42;
+my $num_tests = 79;
 
 my $node        = pgNode->new('prod'); # declare instance named "prod"
 
@@ -161,6 +161,135 @@ $node->command_checks_all( [
     ],
     [ qr/^$/ ],
     'complete example'
+);
+
+# Perfdata always contain the four kinds of issue, even at 0
+truncate $node->data_dir . '/' . 'pg_hba.conf', 0;
+$node->append_conf('pg_hba.conf', "local all all peer");
+$node->reload;
+$node->command_checks_all( [
+    './check_pgactivity', '--service'  => 'hba_settings',
+                          '--username' => $ENV{'USER'} || 'postgres',
+                          '--format'   => 'human'
+    ],
+    0,
+    [
+        qr/^Returns  *: 0 \(OK\)$/m,
+        qr/^Message  *: No issue on hba files$/m,
+        qr/^Perfdata *: error=0 warn=1 crit=1$/m,
+        qr/^Perfdata *: trust=0 warn=1 crit=1$/m,
+        qr/^Perfdata *: password=0 warn=1 crit=1$/m,
+        qr/^Perfdata *: md5=0 warn=1 crit=1$/m,
+    ],
+    [ qr/^$/ ],
+    'perfdata at 0'
+);
+
+# Thresholds are used: 2 trust lines
+truncate $node->data_dir . '/' . 'pg_hba.conf', 0;
+$node->append_conf('pg_hba.conf', "local all all peer");
+$node->append_conf('pg_hba.conf', "local all all trust");
+$node->append_conf('pg_hba.conf', "local all all trust");
+$node->reload;
+$node->command_checks_all( [
+    './check_pgactivity', '--service'  => 'hba_settings',
+                          '--username' => $ENV{'USER'} || 'postgres',
+                          '--format'   => 'human',
+                          '--warning'  => '3',
+                          '--critical' => '5'
+    ],
+    0,
+    [
+        qr/^Returns  *: 0 \(OK\)$/m,
+        qr/^Message  *: 2 trust method\(s\)$/m,
+        qr/^Perfdata *: trust=2 warn=3 crit=5$/m,
+    ],
+    [ qr/^$/ ],
+    'trust lines under the thresholds'
+);
+
+$node->command_checks_all( [
+    './check_pgactivity', '--service'  => 'hba_settings',
+                          '--username' => $ENV{'USER'} || 'postgres',
+                          '--format'   => 'human',
+                          '--warning'  => '2',
+                          '--critical' => '3'
+    ],
+    1,
+    [
+        qr/^Returns  *: 1 \(WARNING\)$/m,
+        qr/^Message  *: 2 trust method\(s\)$/m,
+    ],
+    [ qr/^$/ ],
+    'trust lines over the warning threshold'
+);
+
+$node->command_checks_all( [
+    './check_pgactivity', '--service'  => 'hba_settings',
+                          '--username' => $ENV{'USER'} || 'postgres',
+                          '--format'   => 'human',
+                          '--warning'  => '1',
+                          '--critical' => '2'
+    ],
+    2,
+    [
+        qr/^Returns  *: 2 \(CRITICAL\)$/m,
+        qr/^Message  *: 2 trust method\(s\)$/m,
+    ],
+    [ qr/^$/ ],
+    'trust lines over the critical threshold'
+);
+
+# md5 lines never raise a critical
+truncate $node->data_dir . '/' . 'pg_hba.conf', 0;
+$node->append_conf('pg_hba.conf', "local all all peer");
+$node->append_conf('pg_hba.conf', "local all all md5");
+$node->append_conf('pg_hba.conf', "local all all md5");
+$node->append_conf('pg_hba.conf', "local all all md5");
+$node->reload;
+$node->command_checks_all( [
+    './check_pgactivity', '--service'  => 'hba_settings',
+                          '--username' => $ENV{'USER'} || 'postgres',
+                          '--format'   => 'human',
+                          '--warning'  => '1',
+                          '--critical' => '2'
+    ],
+    1,
+    [
+        qr/^Returns  *: 1 \(WARNING\)$/m,
+        qr/^Message  *: 3 md5 method\(s\)$/m,
+    ],
+    [ qr/^$/ ],
+    'md5 lines over the critical threshold'
+);
+
+# Invalid thresholds
+foreach my $thresholds ( [ 'abc', '2' ], [ '0', '1' ], [ '1.5', '2' ] ) {
+    $node->command_checks_all( [
+        './check_pgactivity', '--service'  => 'hba_settings',
+                              '--username' => $ENV{'USER'} || 'postgres',
+                              '--format'   => 'human',
+                              '--warning'  => $thresholds->[0],
+                              '--critical' => $thresholds->[1]
+        ],
+        127,
+        [ qr/^$/ ],
+        [ qr/FATAL: critical and warning thresholds only accept a raw number of lines greater than 0\./ ],
+        "invalid thresholds -w $thresholds->[0] -c $thresholds->[1]"
+    );
+}
+
+$node->command_checks_all( [
+    './check_pgactivity', '--service'  => 'hba_settings',
+                          '--username' => $ENV{'USER'} || 'postgres',
+                          '--format'   => 'human',
+                          '--warning'  => '3',
+                          '--critical' => '2'
+    ],
+    127,
+    [ qr/^$/ ],
+    [ qr/FATAL: warning threshold must not be greater than the critical one\./ ],
+    'warning threshold greater than the critical one'
 );
 
 ### End of tests ###
