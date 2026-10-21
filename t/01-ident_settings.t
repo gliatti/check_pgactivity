@@ -9,7 +9,7 @@ use warnings;
 
 use lib 't/lib';
 use pgNode;
-use Test::More tests => 2;
+use Test::More tests => 3;
 
 my $node        = pgNode->new('prod'); # declare instance named "prod"
 
@@ -76,12 +76,61 @@ subtest pg15 => sub {
                 qr/^Service  *: POSTGRES_IDENT_SETTINGS$/m,
                 qr/^Returns  *: 2 \(CRITICAL\)$/m,
                 qr/^Message  *: 1 error\(s\)$/m,
-                qr/^Long message *: file .*, line \d+, error: .*$/m,
+                qr/^Long message *: file .*pg_ident\.conf, line \d+, error: .*$/m,
                 qr/^Perfdata *: errors=1$/m,
             ],
             [ qr/^$/ ],
             'simple check with error'
         );
+    }
+};
+
+# PostgreSQL 15+: role with only the privileges documented for the service
+subtest 'pg15 unprivileged role' => sub {
+    plan tests => 5;
+
+    SKIP: {
+        skip "incompatible tests with PostgreSQL < 15", 5
+            unless $node->version >= 15.0;
+
+        $node->safe_psql( 'postgres', q{
+            CREATE ROLE ident_mon LOGIN;
+            GRANT SELECT ON pg_ident_file_mappings TO ident_mon;
+            GRANT EXECUTE ON FUNCTION pg_ident_file_mappings TO ident_mon;
+        });
+
+        $node->append_conf('pg_ident.conf', "bazqux");
+
+        $node->command_checks_all( [
+            './check_pgactivity', '--service'  => 'ident_settings',
+                                  '--username' => 'ident_mon',
+                                  '--dbname'   => 'postgres',
+                                  '--format'   => 'human'
+            ],
+            2,
+            [
+                qr/^Returns  *: 2 \(CRITICAL\)$/m,
+                qr/^Long message *: .*file .*, line \d+, error: .*$/m,
+                qr/^Perfdata *: errors=2$/m,
+            ],
+            [ qr/^$/ ],
+            'check with error as a non-superuser role'
+        );
+
+        # cleanup
+        my $ident_file = $node->data_dir . '/pg_ident.conf';
+        my $content = TestLib::slurp_file($ident_file);
+        $content =~ s/^bazqux\n//m;
+        open my $fh, '>', $ident_file or die "unable to write $ident_file: $!";
+        print $fh $content;
+        close $fh;
+        $node->reload;
+
+        $node->safe_psql( 'postgres', q{
+            REVOKE SELECT ON pg_ident_file_mappings FROM ident_mon;
+            REVOKE EXECUTE ON FUNCTION pg_ident_file_mappings FROM ident_mon;
+            DROP ROLE ident_mon;
+        });
     }
 };
 

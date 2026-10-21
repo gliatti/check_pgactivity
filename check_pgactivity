@@ -3772,7 +3772,7 @@ sub check_btree_bloat {
 
 Check errors in ident settings: pg_ident.conf and alike.
 
-Perfdata contains the number of errors per files.
+Perfdata contains the total number of errors.
 
 Thresholds, if any, are ignored.
 
@@ -3781,6 +3781,9 @@ superuser, or user with access to pg_ident_file_mappings
 in the monitoring database, with:
 GRANT SELECT ON pg_ident_file_mappings TO … ;
 GRANT EXECUTE ON FUNCTION pg_ident_file_mappings TO … ;
+
+With PostgreSQL 15, the file name is only reported for a superuser or
+a user with pg_read_all_settings (or pg_monitor).
 
 =cut
 
@@ -3797,10 +3800,12 @@ sub check_ident_settings {
 
     my %queries      = (
         $PG_VERSION_150 => q{
-            SELECT NULL, line_number, error
+            SELECT coalesce((SELECT setting FROM pg_settings
+                             WHERE name = 'ident_file'), ''),
+                   line_number, error
             FROM pg_ident_file_mappings
             WHERE error IS NOT NULL
-            ORDER BY 1, 2, 3
+            ORDER BY 2, 3
         },
         $PG_VERSION_160 => q{
             SELECT file_name, line_number, error
