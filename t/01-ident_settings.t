@@ -76,7 +76,7 @@ subtest pg15 => sub {
                 qr/^Service  *: POSTGRES_IDENT_SETTINGS$/m,
                 qr/^Returns  *: 2 \(CRITICAL\)$/m,
                 qr/^Message  *: 1 error\(s\)$/m,
-                qr/^Long message *: file .*, line \d+, error: .*$/m,
+                qr/^Long message *: file \S*pg_ident\.conf, line \d+, error: .*$/m,
                 qr/^Perfdata *: errors=1$/m,
             ],
             [ qr/^$/ ],

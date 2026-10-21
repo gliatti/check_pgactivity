@@ -3772,7 +3772,7 @@ sub check_btree_bloat {
 
 Check errors in ident settings: pg_ident.conf and alike.
 
-Perfdata contains the number of errors per files.
+Perfdata contains the total number of errors.
 
 Thresholds, if any, are ignored.
 
@@ -3797,7 +3797,7 @@ sub check_ident_settings {
 
     my %queries      = (
         $PG_VERSION_150 => q{
-            SELECT NULL, line_number, error
+            SELECT current_setting('ident_file'), line_number, error
             FROM pg_ident_file_mappings
             WHERE error IS NOT NULL
             ORDER BY 1, 2, 3
