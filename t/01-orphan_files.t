@@ -12,7 +12,7 @@ use pgNode;
 use pgSession;
 use File::Copy;
 use Time::HiRes qw(usleep gettimeofday tv_interval);
-use Test::More tests => 75;
+use Test::More tests => 91;
 
 my $node = pgNode->get_new_node('prod');
 my $proc;
@@ -23,7 +23,7 @@ $node->start;
 ### Beginning of tests ###
 
 SKIP: {
-    skip "testing incompatibility with PostgreSQL 9.4 and before", 75
+    skip "testing incompatibility with PostgreSQL 9.4 and before", 91
         if $node->version < '9.5';
 
 # Find the OID of the postgres database
@@ -108,6 +108,87 @@ $node->command_checks_all( [
     ],
     [ qr/^$/ ],
     'basic check with thresholds at 0/0MB'
+);
+
+
+# invalid thresholds => FATAL
+#
+$node->command_checks_all( [
+    './check_pgactivity', '--service'  => 'orphan_files',
+                          '--username' => $ENV{'USER'} || 'postgres',
+                          '--format'   => 'human',
+                          '--dbname'   => 'template1',
+                          '--warning'  => 'xx',
+                          '--critical' => '1MB',
+    ],
+    127,
+    [ qr/^$/ ],
+    [ qr/^FATAL: critical and warning thresholds only accept a number of files, a size or both separated by a comma\.$/m ],
+    'invalid warning threshold'
+);
+
+$node->command_checks_all( [
+    './check_pgactivity', '--service'  => 'orphan_files',
+                          '--username' => $ENV{'USER'} || 'postgres',
+                          '--format'   => 'human',
+                          '--dbname'   => 'template1',
+                          '--warning'  => '1MB',
+                          '--critical' => '2MB,xx',
+    ],
+    127,
+    [ qr/^$/ ],
+    [ qr/^FATAL: critical and warning thresholds only accept a number of files, a size or both separated by a comma\.$/m ],
+    'invalid critical threshold'
+);
+
+# files of a temporary table (t<backend>_<filenode>) are not orphans
+#
+my $tmpsession = pgSession->new($node, 'postgres');
+$tmpsession->query('CREATE TEMP TABLE tmp_orphan AS SELECT generate_series(1, 1000) AS i', 5);
+# wait for the previous statement to complete
+$tmpsession->query('SELECT 1', 5);
+
+$node->command_checks_all( [
+    './check_pgactivity', '--service'  => 'orphan_files',
+                          '--username' => $ENV{'USER'} || 'postgres',
+                          '--format'   => 'human',
+                          '--dbname'   => 'template1',
+                          '--warning'  => '0',
+                          '--critical' => '0',
+    ],
+    0,
+    [ qr/^Service  *: POSTGRES_ORPHAN_FILES$/m,
+      qr/^Returns  *: 0 \(OK\)$/m,
+      qr/^Message  *: No orphan files found!$/m,
+    ],
+    [ qr/^$/ ],
+    'temporary table files are not orphans'
+);
+
+$tmpsession->{'proc'}->kill_kill;
+
+# empty files left after DROP TABLE or ROLLBACK until the next checkpoint
+# are not orphans
+#
+$node->psql('postgres', 'CREATE TABLE dropped AS SELECT generate_series(1, 1000) AS i');
+$node->psql('postgres', 'DROP TABLE dropped');
+$node->psql('postgres', 'BEGIN; CREATE TABLE rolledback AS SELECT generate_series(1, 1000) AS i; ROLLBACK');
+
+$node->command_checks_all( [
+    './check_pgactivity', '--service'  => 'orphan_files',
+                          '--username' => $ENV{'USER'} || 'postgres',
+                          '--format'   => 'human',
+                          '--dbname'   => 'template1',
+                          '--warning'  => '0',
+                          '--critical' => '0',
+    ],
+    0,
+    [ qr/^Service  *: POSTGRES_ORPHAN_FILES$/m,
+      qr/^Returns  *: 0 \(OK\)$/m,
+      qr/^Message  *: No orphan files found!$/m,
+    ],
+    [ qr/^$/ ],
+    'empty files left after DROP or ROLLBACK are not orphans'
 );
 
 

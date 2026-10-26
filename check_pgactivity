@@ -7433,10 +7433,13 @@ separated by a comma. Thresholds are applied on current orphan files. Eg:
 
 The --detailed option lists all orphan files.
 
+Files of temporary tables are not reported, nor are the empty files that
+PostgreSQL keeps after a DROP or a rollback until the next checkpoint.
+
 Required privileges:
-a user with pg_monitor or pg_read_all_setting and:
+a user with pg_monitor or pg_read_all_settings and, in each database:
 GRANT EXECUTE ON FUNCTION pg_ls_dir(text, bool, bool) TO … ;
-GRANT EXECUTE ON FUNCTION pg_stat_file(text, bool) TO … ;
+GRANT EXECUTE ON FUNCTION pg_stat_file(text) TO … ;
 
 =cut
 
@@ -7536,22 +7539,36 @@ orphans AS (
         c.oid IS NULL
         AND LOWER(file_name)
         NOT LIKE 'pg_%'
+        -- files of temporary tables: t<backend>_<filenode>
+        AND file_name !~ E'^t[0-9]+_'
+),
+orphans_size AS (
+    SELECT
+        file_name,
+        orphaned_file,
+        (pg_stat_file(orphaned_file)).size AS size
+    FROM
+        orphans
+    WHERE
+        rel_without_pgclass IS NULL
 )
 SELECT
     current_database(),
     orphaned_file,
-    (pg_stat_file(orphaned_file)).size
+    size
 FROM
-    orphans
+    orphans_size
 WHERE
-    rel_without_pgclass IS NULL
+    -- ignore the empty first segment of the main fork kept after a DROP or a
+    -- rollback until the next checkpoint
+    NOT (size = 0 AND file_name ~ E'^[0-9]+$')
 ORDER BY current_database};
 
     $detailed = $args{'detailed'};
 
     @hosts = @{ parse_hosts %args };
 
-    is_compat $hosts[0], 'orphan_files', $PG_VERSION_94 or exit 1;
+    is_compat $hosts[0], 'orphan_files', $PG_VERSION_95 or exit 1;
 
     pod2usage(
         -message => 'FATAL: you must give only one host with service "orphan_files".',
@@ -7559,6 +7576,15 @@ ORDER BY current_database};
     ) if @hosts != 1;
 
     if ( defined $args{'warning'} and defined $args{'critical'} ) {
+
+        # Thresholds: a number of files, a size or both separated by a comma
+        my $thr_re = qr/^\s*(?:\d+(?:\s*,\s*\d+[kmgtpez]?b)?|\d+[kmgtpez]?b(?:\s*,\s*\d+)?)\s*$/i;
+
+        pod2usage(
+            -message => 'FATAL: critical and warning thresholds only accept a number of files, '
+                .'a size or both separated by a comma.',
+            -exitval => 127
+        ) unless $args{'warning'} =~ $thr_re and $args{'critical'} =~ $thr_re;
 
         while ( $args{'warning'} =~ m/(?:(\d+)([kmgtpez]?b)?)/ig ) {
             if ( defined $2 ) {
@@ -7585,8 +7611,8 @@ ORDER BY current_database};
         ) if (         (defined $w_flimit or defined $w_limit)
                and not (defined $c_flimit or defined $c_limit)
             ) or (
-                   (not defined $w_flimit and defined $w_flimit)
-               and (defined $c_flimit or  defined $c_limit)
+               not (defined $w_flimit or defined $w_limit)
+               and (defined $c_flimit or defined $c_limit)
             ) ;
 
         @perf_flimits = ( $w_flimit, $c_flimit ) if defined $w_flimit;
