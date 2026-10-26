@@ -5360,7 +5360,8 @@ sub check_is_master {
 
 Check if there are invalid indexes in a database.
 
-A critical alert is raised if an invalid index is detected.
+A critical alert is raised if an invalid index is detected. Invalid
+partitioned indexes (PostgreSQL 11 and above) are reported as well.
 
 This service supports both C<--dbexclude>  and C<--dbinclude> parameters.
 The 'postgres' database and templates are always excluded.
@@ -5403,7 +5404,7 @@ sub check_invalid_indexes {
             join pg_namespace nsp on nsp.oid = cls.relnamespace
             join pg_index idx on idx.indexrelid = cls.oid
         WHERE
-            cls.relkind = 'i'
+            cls.relkind IN ('i', 'I')
         AND nsp.nspname NOT IN ('information_schema', 'pg_catalog');
     };
 
@@ -5447,7 +5448,7 @@ sub check_invalid_indexes {
         $c_count += $idx_invalid;
         push @perfdata => ["invalid index in $db", $idx_invalid ];
     }
-    push @longmsg => sprintf "%i index(es) exclude from check", $total_extbl
+    push @longmsg => sprintf "%i index(es) excluded from check", $total_extbl
         if $total_extbl > 0;
 
     # we use the critical count for the **total** number of invalid index
