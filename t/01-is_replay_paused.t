@@ -10,7 +10,7 @@ use warnings;
 use lib 't/lib';
 use pgNode;
 use pgSession;
-use Test::More tests => 25;
+use Test::More tests => 36;
 use Time::HiRes qw(usleep gettimeofday tv_interval);
 
 my $prim      = pgNode->get_new_node('prim');
@@ -22,7 +22,7 @@ note "testing on version $pgversion";
 
 # Tests for PostreSQL 9.0 and after
 SKIP: {
-    skip "these tests requires PostgreSQL 9.1 and after", 25
+    skip "these tests requires PostgreSQL 9.1 and after", 36
         unless $pgversion >= '9.0';
 
 # create primary and start it
@@ -61,6 +61,21 @@ $prim->command_checks_all( [
     ],
     [ qr/^$/ ],
     'check on master'
+);
+
+note("Checking master perfdata: has_data_delta has no unit");
+$prim->command_checks_all( [
+    './check_pgactivity', '--service'  => 'is_replay_paused',
+                          '--username' => $ENV{'USER'} || 'postgres',
+                          '--host'     => $prim->host,
+                          '--port'     => $prim->port,
+    ],
+    3,
+    [ qr/ lag_time=NaNs /,
+      qr/ has_data_delta=NaN$/m,
+    ],
+    [ qr/^$/ ],
+    'perfdata on master'
 );
 
 note("Checking secondary (not paused), expecting OK");
@@ -152,6 +167,48 @@ $stb1->command_checks_all( [
     [ qr/^$/ ],
     'replay paused, critical'
 );
+
+note("Checking secondary paused before replaying any transaction");
+# no background activity may write a commit record on the primary
+$prim->safe_psql('template1', 'ALTER SYSTEM SET autovacuum TO off');
+$prim->safe_psql('template1', 'SELECT pg_reload_conf()');
+$prim->backup('backup2');
+my $stb2 = pgNode->get_new_node('sec2');
+$stb2->init_from_backup($prim, 'backup2', has_streaming => 1);
+$stb2->start;
+$prim->wait_for_catchup($stb2, 'replay', $prim->lsn('insert'));
+if ($pgversion >= 10) {
+    $stb2->safe_psql('template1', 'SELECT pg_wal_replay_pause()');
+}
+else {
+    $stb2->safe_psql('template1', 'SELECT pg_xlog_replay_pause()');
+}
+is( $stb2->safe_psql('template1',
+        'SELECT pg_last_xact_replay_timestamp() IS NULL'),
+    't', 'no transaction replayed on the secondary' );
+$proc->query('INSERT INTO t1 SELECT FROM pg_class', 1);
+$t0 = [gettimeofday]; ; usleep(100_000) while tv_interval($t0) < 3.1; # sleep
+
+$stb2->command_checks_all( [
+    './check_pgactivity', '--service'  => 'is_replay_paused',
+                          '--username' => $ENV{'USER'} || 'postgres',
+                          '--format'   => 'human',
+                          '--warning'  => '1s',
+                          '--critical' => '2s',
+                          '--host'     => $stb2->host,
+                          '--port'     => $stb2->port
+    ],
+    3,
+    [ qr/^Service  *: POSTGRES_REPLICATION_PAUSED$/m,
+      qr/^Returns  *: 3 \(UNKNOWN\)$/m,
+      qr/^Message  *:  replay is paused, but no transaction replayed yet/m,
+      qr/^Perfdata  *: lag_time=NaNs$/m,
+    ],
+    [ qr/^$/ ],
+    'replay paused, no transaction replayed'
+);
+
+$stb2->stop( 'immediate' );
 
 ### End of tests ###
 
