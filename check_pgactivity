@@ -408,6 +408,9 @@ Repeat this option as many time as needed.
 See C<--dbexclude> as well. If a database matches both dbexclude and
 dbinclude arguments, it is excluded.
 
+Note: the C<pg_dump_backup> service takes each value as a literal database
+name, not as a regular expression. See its documentation.
+
 =item B<-w>, B<--warning> THRESHOLD
 
 The Warning threshold.
@@ -7651,18 +7654,24 @@ ORDER BY current_database};
 
 Check the age and size of backups.
 
-This service uses the status file (see C<--status-file> parameter).
+This service always uses the status file (see C<--status-file> parameter) to
+keep the size of the newest backups between two calls. This size is needed by
+the C<size> threshold.
 
-The C<--path> argument contains the location to the backup folder. The
-supported format is a glob pattern matching every folder or file that you need
-to check.
+The C<--path> argument is required. It is a glob pattern matching the backup
+files to check, B<not> a backup folder: a directory is refused. Don't forget
+to quote it to avoid its expansion by the shell, eg.
+C<--path '/var/lib/backups/*'>.
 
 The C<--pattern> is required, and must contain a regular expression matching
 the backup file name, extracting the database name from the first matching
-group.
+group. The regular expression is applied on the full path of each file
+returned by C<--path>. It should be anchored at its end with C<$> to avoid
+matching other files, like checksum files (eg. C<.sha256>), as backups.
 
 Optionally, a C<--global-pattern> option can be supplied to check for an
-additional global file.
+additional global file. Results are then reported under the
+C<globals_objects> name.
 
 Examples:
 
@@ -7676,7 +7685,7 @@ To monitor backups like:
 you must set:
 
     --path    '/var/lib/backups/*'
-    --pattern '(\w+)-\d+.dump'
+    --pattern '(\w+)-\d+\.dump$'
 
 If the path contains the date, like this:
 
@@ -7686,31 +7695,50 @@ If the path contains the date, like this:
 then you can set (don't forget the quotes):
 
     --path    '/var/lib/backups/*/*.dump'
-    --pattern '/\d+-\d+-\d+-daily/(.*).dump'
+    --pattern '/\d+-\d+-\d+-daily/(.*)\.dump$'
 
-For compatibility with pg_back (https://github.com/orgrim/pg_back),
-you should use:
+For compatibility with pg_back (https://github.com/orgrim/pg_back) v2 and
+its default C<rfc3339> time format, producing files like
+C<employes_2025-04-03T13:38:48Z.dump> and
+C<pg_globals_2025-04-03T13:38:48Z.sql>, you should use:
 
-   --path '/path/*{dump,sql}'
-   --pattern '(\w+)_[0-9-_]+.dump'
-   --global-pattern 'pg_global_[0-9-_]+.sql'
+   --path           '/path/*'
+   --pattern        '(\w+)_[0-9TZ:+-]+\.dump$'
+   --global-pattern 'pg_globals_[0-9TZ:+-]+\.sql$'
+
+With the pg_back C<legacy> time format, producing files like
+C<employes_2025-04-03_13-38-48.dump> and
+C<pg_globals_2025-04-03_13-38-48.sql>, you should use:
+
+   --path           '/path/*'
+   --pattern        '(\w+)_[0-9_-]+\.dump$'
+   --global-pattern 'pg_globals_[0-9_-]+\.sql$'
 
 The C<--critical> and C<--warning> thresholds are optional. They accept a list
 of 'metric=value' separated by a comma. Available metrics are C<oldest> and
 C<newest>, respectively the age of the oldest and newest backups, and C<size>,
 which must be the maximum variation of size since the last check, expressed as
 a size or a percentage. C<mindeltasize>, expressed in B, is the minimum
-variation of size needed to raise an alert.
+variation of size needed to raise an alert. Metric names are case insensitive.
+As the C<size> variation is computed from the previous call, it can not be
+checked on the first call.
 
-This service supports the C<--dbinclude> and C<--dbexclude> arguments, to
-respectively test for the presence of include or exclude files.
+This service supports the C<--dbinclude> and C<--dbexclude> arguments.
+Unlike other services, each C<--dbinclude> value is taken as a literal
+database name, B<not> as a regular expression: the service then checks
+exactly these databases, without connecting to the instance to list them.
+Eg. C<--dbinclude 'mydb' --dbinclude 'otherdb'>. A value containing regular
+expression characters like C<'^my'> matches no database and nothing is
+checked. Without C<--dbinclude>, the list of databases is queried from
+C<pg_database>. C<--dbexclude> values are regular expressions, as for other
+services.
 
 The argument C<--exclude> enables you to exclude files younger than an
 interval. This is useful to ignore files from a backup in progress. Eg., if
 your backup process takes 2h, set this to '125m'.
 
-Perfdata returns the age of the oldest and newest backups, as well as the size
-of the newest backups.
+Perfdata returns the age of the oldest and newest backups, the size of the
+newest backups and its variation since the last check.
 
 Required privileges: unprivileged role; the system user needs read access
 on the directory containing the dumps (but not on the dumps themselves).
@@ -7765,7 +7793,7 @@ sub check_pg_dump_backup {
     ) if @hosts != 1;
 
     pod2usage(
-        -message => "FATAL: to use a size threshold, a status-file is required",
+        -message => "FATAL: a status-file is required",
         -exitval => 127
     ) unless $args{'status-file'};
 
@@ -7783,7 +7811,7 @@ sub check_pg_dump_backup {
     $min_age = get_time( $args{'exclude'}[0] ) if defined $args{'exclude'}[0];
 
     while ( $args{'warning'} and $args{'warning'} =~ /$thresholds_re/g ) {
-        my ( $threshold, $value ) = ($1, $2);
+        my ( $threshold, $value ) = ( lc $1, $2 );
 
         if( $threshold eq "oldest" or $threshold eq "newest" ) {
             pod2usage(
@@ -7798,7 +7826,7 @@ sub check_pg_dump_backup {
     }
 
     while ( $args{'critical'} and $args{'critical'} =~ /$thresholds_re/g ) {
-        my ($threshold, $value) = ($1, $2);
+        my ( $threshold, $value ) = ( lc $1, $2 );
 
         if( $threshold eq "oldest" or $threshold eq "newest" ) {
             pod2usage(
@@ -7862,7 +7890,7 @@ sub check_pg_dump_backup {
     %db_sizes = %{ load( $hosts[0], 'pg_dump_backup', $args{'status-file'} ) || {} }
         if exists $warn{'size'} or exists $crit{'size'};
 
-    ALLDB: foreach my $row ( @rs ) {
+    foreach my $row ( @rs ) {
         my $db = $row->[0];
         my @perf_newest;
         my @perf_oldest;
@@ -7935,14 +7963,16 @@ sub check_pg_dump_backup {
             }
         }
 
-        if ( exists $warn{'size'} or exists $crit{'size'} ) {
-            next ALLDB unless exists $db_sizes{$db};
-
+        # The size variation can only be checked from the second run
+        if ( ( exists $warn{'size'} or exists $crit{'size'} )
+            and exists $db_sizes{$db}
+        ) {
             my $w_delta = get_size( $warn{'size'}, $db_sizes{$db}[1] )
                 if exists $warn{'size'};
             my $c_delta = get_size( $crit{'size'}, $db_sizes{$db}[1] )
                 if exists $crit{'size'};
-            my $delta = abs( $lasts{$db}[1] - $db_sizes{$db}[1] );
+            my $variation = $lasts{$db}[1] - $db_sizes{$db}[1];
+            my $delta     = abs( $variation );
 
             push @perf_delta => ( defined $w_delta ? $w_delta: undef );
             push @perf_delta => ( defined $c_delta ? $c_delta: undef );
@@ -7953,10 +7983,10 @@ sub check_pg_dump_backup {
             $c_mindeltasize = $crit{'mindeltasize'} if exists $crit{'mindeltasize'};
 
             if ( defined $c_delta and $delta > $c_delta and $delta >= $c_mindeltasize ) {
-                push @msg_crit => sprintf("'%s_delta'=%dB", $db, $lasts{$db}[1]);
+                push @msg_crit => sprintf("'%s_delta'=%dB", $db, $variation);
             }
             elsif ( defined $w_delta and $delta > $w_delta and $delta >= $w_mindeltasize ) {
-                push @msg_warn => sprintf("'%s_delta'=%dB", $db, $lasts{$db}[1]);
+                push @msg_warn => sprintf("'%s_delta'=%dB", $db, $variation);
             }
         }
 
