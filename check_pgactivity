@@ -6602,8 +6602,8 @@ sub check_max_freeze_age {
     @rs = @{ query_ver( $hosts[0], %queries ) };
 
     if ( scalar @rs and defined $args{'critical'} ) {
-        $c_limit = int($1 * $rs[0][2]/100) if $args{'critical'} =~ /^([0-9.]+)%$/;
-        $w_limit = int($1 * $rs[0][2]/100) if $args{'warning'}  =~ /^([0-9.]+)%$/;
+        $c_limit = int($1 * $rs[0][2]/100) if $args{'critical'} =~ /^([0-9]+)%$/;
+        $w_limit = int($1 * $rs[0][2]/100) if $args{'warning'}  =~ /^([0-9]+)%$/;
     }
 
     REC_LOOP: foreach my $r (@rs) {
@@ -6638,6 +6638,9 @@ sub check_max_freeze_age {
                 if defined $w_limit and $r->[1] > $w_limit;
         }
     }
+
+    return status_unknown( $me, [ 'No database checked' ] )
+        unless scalar @perfdata;
 
     return status_critical( $me, [
             'Critical: '. join(',', @msg_crit)
