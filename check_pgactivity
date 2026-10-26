@@ -6666,11 +6666,14 @@ minor version is not the most recent.
 
 You can optionally set the path to your prefered retrieval tool using
 the C<--path> parameter (eg. C<--path '/usr/bin/wget'>). Supported programs are:
-GET, wget, curl, fetch, lynx, links, links2.
+GET, wget, curl, fetch, lynx, links, links2. Without C<--path>, they are
+tried in this order from the PATH, until one returns the versions.
 
 If you do not want to (or cannot) query the PostgreSQL website,
 provide the expected versions using either C<--warning> OR
 C<--critical>, depending on which return value you want to raise.
+The alert is raised only if the running minor version is older than the
+expected one.
 
 The given string must contain one or more MINOR versions separated by anything
 but a '.'. For instance, the following parameters are all equivalent:
@@ -6719,19 +6722,22 @@ sub check_minor_version {
         # These methods come from check_postgres,
         # by Greg Sabino Mullane <greg@endpoint.com>,
         # licenced under BSD
-        our %get_methods = (
-            'GET'    => "GET -t $timeout -H 'Pragma: no-cache' $url",
-            'wget'   => "wget --quiet --timeout=$timeout --no-cache -O - $url",
-            'curl'   => "curl --silent --location --max-time $timeout -H 'Pragma: no-cache' $url",
-            'fetch'  => "fetch -q -T $timeout -o - $url",
-            'lynx'   => "lynx --connect-timeout=$timeout --dump $url",
-            'links'  => 'links -dump $url',
-            'links2' => 'links2 -dump $url'
+        # Arguments of each retrieval tool, in the order they are tried.
+        my @get_methods = (
+            [ 'GET',    "-t $timeout -H 'Pragma: no-cache' $url" ],
+            [ 'wget',   "--quiet --timeout=$timeout --no-cache -O - $url" ],
+            [ 'curl',   "--silent --location --max-time $timeout -H 'Pragma: no-cache' $url" ],
+            [ 'fetch',  "-q -T $timeout -o - $url" ],
+            [ 'lynx',   "--connect-timeout=$timeout --dump $url" ],
+            [ 'links',  "-dump $url" ],
+            [ 'links2', "-dump $url" ]
         );
 
         # Force the fetching method
         if ($args{'path'}) {
             my $meth = basename $args{'path'};
+            my $prog = $args{'path'};
+            my ( $get_method ) = grep { $_->[0] eq $meth } @get_methods;
 
             pod2usage(
                 -message => "FATAL: \"$args{'path'}\" is not a valid program.",
@@ -6741,15 +6747,18 @@ sub check_minor_version {
             pod2usage(
                 -message => "FATAL: \"$args{'path'}\" is not a supported program.",
                 -exitval => 127
-            ) unless $meth =~ 'GET|wget|curl|fetch|lynx|links|links2';
+            ) unless defined $get_method;
+
+            # quote the given path for the shell
+            $prog =~ s/'/'\\''/g;
 
             # fetch the latest versions via $path
-            $rss = qx{$get_methods{$meth} 2>/dev/null};
+            $rss = qx{'$prog' $get_method->[1] 2>/dev/null};
         }
         else {
             # Fetch the latest versions
-            foreach my $exe (values %get_methods) {
-                $rss = qx{$exe 2>/dev/null};
+            foreach my $get_method (@get_methods) {
+                $rss = qx{$get_method->[0] $get_method->[1] 2>/dev/null};
 
                 last if $rss =~ 'PostgreSQL latest versions';
             }
@@ -6800,7 +6809,7 @@ sub check_minor_version {
 
     push @perfdata => [ 'version', $hosts[0]{'version_num'}, 'PGNUMVER' ];
 
-    if ( $hosts[0]{'version_num'} != $latest_versions{$major_version}[0] ) {
+    if ( $hosts[0]{'version_num'} < $latest_versions{$major_version}[0] ) {
         push @msg => "PostgreSQL version ". $hosts[0]{'version'}
             ." (should be $latest_versions{$major_version}[1])";
 
