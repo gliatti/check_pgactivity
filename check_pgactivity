@@ -8858,7 +8858,7 @@ PARAM_LOOP: foreach my $row (@rs) {
     return status_ok( $me, [ "Setting OK" ] );
 }
 
-=item B<sequences_exhausted> (7.4+)
+=item B<sequences_exhausted> (8.2+)
 
 Check all sequences and raise an alarm if the column or sequences gets too
 close to the maximum value. The maximum value is calculated from the maxvalue
@@ -8872,7 +8872,12 @@ The 'postgres' database and templates are always excluded.
 
 Critical and Warning thresholds accept a percentage of the sequence filled.
 
-Required privileges: unprivileged role able to log in all databases
+On PostgreSQL 10 and after, sequences the role is not allowed to read are
+reported in the long message. The service returns UNKNOWN if none of the
+existing sequences could be read.
+
+Required privileges: unprivileged role able to log in all databases, with
+SELECT or USAGE privilege on the sequences.
 
 =cut
 sub check_sequences_exhausted {
@@ -8889,6 +8894,8 @@ sub check_sequences_exhausted {
     my @dbinclude = @{ $args{'dbinclude'} };
     my @dbexclude = @{ $args{'dbexclude'} };
     my $criticity=0; # 0=ok, 1=warn, 2=critical
+    my $nb_checked=0;
+    my $nb_noprivs=0;
 
 
 
@@ -8899,8 +8906,10 @@ sub check_sequences_exhausted {
             -exitval => 127
         );
     }
-    unless ( $args{'warning'}  =~ m/^([0-9.]+)%$/
-          and  $args{'critical'} =~ m/^([0-9.]+)%$/)
+    my ( $w_pct ) = $args{'warning'}  =~ m/^([0-9]+(?:\.[0-9]+)?)%$/;
+    my ( $c_pct ) = $args{'critical'} =~ m/^([0-9]+(?:\.[0-9]+)?)%$/;
+
+    unless ( defined $w_pct and defined $c_pct )
     {
         # Warning and critical must be %.
         pod2usage(
@@ -8997,7 +9006,8 @@ SELECT
     END AS last_value,
     seq.seqmin AS min_value,
     seq.seqmax AS max_value,
-    seq.seqincrement AS increment_by
+    seq.seqincrement AS increment_by,
+    has_sequence_privilege(seq.seqrelid, 'SELECT,USAGE'::text) AS has_priv
    FROM pg_sequence seq
    LEFT JOIN (SELECT d.objid, nspname, relname, attname, typname
                 FROM pg_catalog.pg_depend d
@@ -9011,7 +9021,8 @@ SELECT
                  AND d.deptype='a') class
      ON class.objid=seq.seqrelid;};
             # We get an array: for each record, type (int2, int4, int8),
-            # sequence name, column name, last, min, max, increment
+            # sequence name, column name, last, min, max, increment and
+            # privilege
             @rs = @{ query ( $hosts[0], $query, $db ) };
             foreach my $record (@rs)
             {
@@ -9021,6 +9032,7 @@ SELECT
                 $sequences{$record->[1]}->{MINVALSEQ}   = $record->[4];
                 $sequences{$record->[1]}->{MAXVALSEQ}   = $record->[5];
                 $sequences{$record->[1]}->{INCREMENTBY} = $record->[6];
+                $sequences{$record->[1]}->{NOPRIV}      = $record->[7] eq 'f';
             }
         }
 
@@ -9043,6 +9055,14 @@ SELECT
             # When we can't link the sequence to a column, we trust the dba/developer
             # and we're not going to try to guess.
 
+            if ($sequences{$seq}->{NOPRIV}) {
+                # Report sequences we are not allowed to read
+                push @longmsg, "$db.$seq: no SELECT or USAGE privilege";
+                $nb_noprivs++;
+                delete $sequences{$seq};
+                next;
+            }
+
             if ($sequences{$seq}->{LASTVALSEQ} eq '') {
                 # Skip sequences having lastvalue not initialized
                 delete $sequences{$seq};
@@ -9052,9 +9072,13 @@ SELECT
             my $max_val_seq;
             if ($sequences{$seq}->{INCREMENTBY} >= 0) {
                 $max_val_seq=$sequences{$seq}->{MAXVALSEQ};
+                $sequences{$seq}->{ABSMINVALSEQ} = $sequences{$seq}->{MINVALSEQ};
                 $sequences{$seq}->{ABSVALSEQ} = $sequences{$seq}->{LASTVALSEQ};
             } else {
-                $max_val_seq =-$sequences{$seq}->{MINVALSEQ};# Reverse the sign
+                # Reverse the sign: the sequence goes from maxvalue down to
+                # minvalue
+                $max_val_seq =-$sequences{$seq}->{MINVALSEQ};
+                $sequences{$seq}->{ABSMINVALSEQ} =-$sequences{$seq}->{MAXVALSEQ};
                 $sequences{$seq}->{ABSVALSEQ} =-$sequences{$seq}->{LASTVALSEQ};
             }
             # The real maximum value is the smallest of both
@@ -9070,10 +9094,11 @@ SELECT
         # have to think about it anymore.
         foreach my $seq(keys %sequences) {
             # First, get all info
+            $nb_checked++;
             my $real_max_value=$sequences{$seq}->{REALMAXVALUE};
-            my $usable_amount=$real_max_value - $sequences{$seq}->{MINVALSEQ} + 1;
-            my $lim_warning=$usable_amount-get_size($args{'warning'},$usable_amount);
-            my $lim_critical=$usable_amount-get_size($args{'critical'},$usable_amount);
+            my $usable_amount=$real_max_value - $sequences{$seq}->{ABSMINVALSEQ} + 1;
+            my $lim_warning=$usable_amount-int($w_pct * $usable_amount / 100);
+            my $lim_critical=$usable_amount-int($c_pct * $usable_amount / 100);
             my $how_much_left=$real_max_value-$sequences{$seq}->{ABSVALSEQ};
             my $seq_desc;
             my $long_seq_desc;
@@ -9099,9 +9124,11 @@ SELECT
             }
         }
     }
+    return status_unknown( $me, [ 'No sequence could be read' ], undef, \@longmsg )
+        if $nb_noprivs > 0 and $nb_checked == 0;
     return status_warning( $me, \@msg, \@perfdata, \@longmsg ) if $criticity == 1;
     return status_critical( $me, \@msg, \@perfdata, \@longmsg ) if $criticity == 2;
-    return status_ok( $me, \@msg, \@perfdata );
+    return status_ok( $me, \@msg, \@perfdata, \@longmsg );
 }
 
 =item B<stat_snapshot_age> (9.5 to 14 included)
