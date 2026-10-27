@@ -9,7 +9,7 @@ use warnings;
 
 use lib 't/lib';
 use TestLib;
-use Test::More tests => 18;
+use Test::More tests => 24;
 
 ### Beginning of tests ###
 
@@ -81,6 +81,28 @@ command_checks_all( [
     [ qr/^$/ ],
     [ qr/^FATAL: given version does not look like a check_pgactivity version!$/m ],
     'pga_version error on wrong version format'
+);
+
+# version with an underscore never matches $VERSION
+command_checks_all( [
+    './check_pgactivity', '--service'  => 'pga_version',
+                          '--warning'  => '2.13_dev'
+    ],
+    127,
+    [ qr/^$/ ],
+    [ qr/^FATAL: given version does not look like a check_pgactivity version!$/m ],
+    'pga_version error on version with an underscore'
+);
+
+# major version with more than one digit
+command_checks_all( [
+    './check_pgactivity', '--service'  => 'pga_version',
+                          '--warning'  => '10.0'
+    ],
+    1,
+    [ qr/^PGACTIVITY_VERSION WARNING: check_pgactivity $good_version \(should be 10\.0!\), Perl [\d\.]+$/ ],
+    [ qr/^$/ ],
+    'pga_version accepts a two-digit major version'
 );
 
 ### End of tests ###

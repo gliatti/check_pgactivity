@@ -8110,7 +8110,8 @@ sub check_pg_stat_statements_dealloc {
 
 Check if this script is running the given version of check_pgactivity.
 You must provide the expected version using either C<--warning> OR
-C<--critical>.
+C<--critical>, but not both. The version must be given in the same format as
+reported by C<--version>, eg. C<2.8> or C<2.13dev>.
 
 No perfdata is returned.
 
@@ -8134,8 +8135,8 @@ sub check_pga_version {
     pod2usage(
         -message => "FATAL: given version does not look like a check_pgactivity version!",
         -exitval => 127
-    ) if ( defined $args{'critical'} and $args{'critical'} !~ m/^\d\.\d+(?:_?(?:dev|beta|rc)\d*)?$/ )
-        or (defined $args{'warning'} and $args{'warning'} !~ m/^\d\.\d+(?:_?(?:dev|beta|rc)\d*)?$/ );
+    ) if ( defined $args{'critical'} and $args{'critical'} !~ m/^\d+\.\d+(?:(?:dev|beta|rc)\d*)?$/ )
+        or (defined $args{'warning'} and $args{'warning'} !~ m/^\d+\.\d+(?:(?:dev|beta|rc)\d*)?$/ );
 
     return status_critical( $me,
         [ sprintf($msg, " (should be $args{'critical'}!)", $^V) ]
