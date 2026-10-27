@@ -430,6 +430,11 @@ and C<json> formats respectively. The only difference is that they enforce the
 units to follow the strict Nagios specs: B, c, s or %. Any unit absent from
 this list is dropped (Bps, Tps, etc).
 
+=item B<--uid> USERNAME
+
+System user name (resolved with C<getpwnam>) expected to own the data
+directory. Only used by service C<pgdata_permission>.
+
 =item B<--tmpdir> DIRECTORY
 
 Path to a directory where the script can create temporary files. The
@@ -8150,8 +8155,9 @@ sub check_pga_version {
 
 =item B<pgdata_permission> (8.2+)
 
-Check that the instance data directory rights are 700, and belongs
-to the system user currently running postgresql.
+Check that the instance data directory rights are 0700 (or 0750 starting with
+v11, see C<data_directory_mode>), and that it belongs to the system user
+currently running postgresql.
 
 The check on rights works on all Unix systems.
 
@@ -8159,9 +8165,15 @@ Checking the user only works on Linux systems (it uses /proc to avoid
 dependencies). Before 9.3, you need to provide the expected owner using the
 C<--uid> argument, or the owner will not be checked.
 
-After 11, if the user running the script doesn't have the right to use stats,
-it will check the mode with the data_directory_mode GUC. It won't be able to
-check the owner though.
+Argument C<--uid> accepts a system user name (resolved with C<getpwnam>),
+which is then used as the expected owner of the data directory instead of
+the user running postgresql.
+
+If the role used cannot read the C<data_directory> parameter, or if the system
+user running the script cannot C<stat()> the data directory, the service
+returns UNKNOWN. The C<data_directory_mode> parameter is not used as a fallback:
+it only reflects the rights of the data directory when the instance started
+(0700 or 0750), not the current ones.
 
 Required privileges:
 - <11: superuser
@@ -8205,28 +8217,20 @@ sub check_pgdata_permission {
 
     $data_directory = $rs[0][0];
 
+    return status_unknown( $me, [
+        "cannot read data_directory: insufficient privileges "
+        ."(superuser, pg_monitor or pg_read_all_settings required)"
+    ] ) if not defined $data_directory or $data_directory eq '';
+
     @stat = stat( $data_directory );
+
+    return status_unknown( $me,
+        [ "cannot stat PGDATA $data_directory: $!" ]
+    ) unless @stat;
 
     $mode    = $stat[2];
     $dir_uid = $stat[4];
-    $perm = sprintf( "%04o", $mode & 07777 ) unless (not defined ($mode));
-
-    if ( not defined ($dir_uid) ) {
-        if ( $hosts[0]{'version_num'} >= $PG_VERSION_110 ) {
-            # Get the data mode another way
-            $query = q{
-                SELECT setting FROM pg_settings WHERE name='data_directory_mode'
-            };
-
-            @rs = @{ query( $hosts[0], $query ) };
-
-            $perm = $rs[0][0];
-        } else {
-            return status_unknown( $me,
-                [ "Postgresql returned this PGDATA: $data_directory, but I cannot access it: $!" ]
-            );
-        }
-    }
+    $perm    = sprintf( "%04o", $mode & 07777 );
 
     # starting with v11, PGDATA can be 0750.
     if ($perm eq '0700'
@@ -8274,12 +8278,16 @@ sub check_pgdata_permission {
     if ( not defined $pg_uid ) {
         push @longmsg, ( "Cannot determine UID of user running postgres. Try to use '--uid'?" );
     }
-    elsif ( not defined $dir_uid ) {
-        push @longmsg, ( "Cannot determine UID of data directory owner." );
-    }
     elsif ( $pg_uid ne $dir_uid ) {
         $criticity = 2;
-        push @msg, ( "User running Postgres ($pg_uid) doesn't own $data_directory ($dir_uid)" );
+        if ( defined $args{'uid'} ) {
+            push @msg, ( "$data_directory is owned by UID $dir_uid, "
+                ."expected UID $pg_uid (--uid $args{'uid'})" );
+        }
+        else {
+            push @msg, ( "$data_directory is owned by UID $dir_uid, "
+                ."not by the user running Postgres (UID $pg_uid)" );
+        }
     }
     else {
         push @msg, ( "Owner of $data_directory is ($pg_uid)" );
